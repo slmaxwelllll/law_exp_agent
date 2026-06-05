@@ -62,9 +62,21 @@ tool实现：
       路径比对、分支发现、版本diff。NetworkX集成简单，
 
 `pip install networkx`后`nx.DiGraph()`直接建图、`add_node/add_edge`写入，
-
 可视化用`matplotlib`一行`nx.draw()`出图，结构一目了然。开销极低，
 纯内存计算，百节点千边毫秒级完成，不依赖外部服务，原型阶段零运维成本。
+
+NetworkX 核心优势（对比纯 JSON + 文件读写）：
+  JSON 是存储格式，NetworkX 是图计算引擎。NetworkX 提供的能力：
+  - nx.find_cycle() 检测环 / nx.topological_sort() 拓扑排序（手写需DFS）
+  - 子图同构判断：新步骤序列能否匹配已有模板中的某条路径
+  - nx.graph_edit_distance() 版本结构 diff（文本 diff 看不出图结构变化）
+  - nx.draw() 直接出图可视化（纯 JSON 无法可视化）
+  LLM 擅长语义归纳，但不擅长精确图结构推理，NetworkX 补的是这部分。
+
+集成时机（分阶段）：
+  阶段1（当前）：LLM 负责抽取+归纳+写入 JSON，暂不需 NetworkX
+  阶段2（模板 > 5个，分支复杂到人眼记不住）：接入 NetworkX，用于可视化和程序化合并判断
+  阶段3（自动化演化）：NetworkX 承担图结构对齐和合并，减少 LLM 调用次数
 
 2026.6.5 轮内流程设计决策（采集与挖掘的衔接方式）：
 核心结论：一次agent run内分两阶段——逐篇抽取（独立上下文，不归纳）→ 批量归纳（同时看到10组序列）。

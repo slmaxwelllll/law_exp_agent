@@ -1,0 +1,52 @@
+{
+  "crime_type": "故意伤害",
+  "version": 1,
+  "nodes": [
+    {
+      "id": "node_1",
+      "type": "分支",
+      "label": "区分故意伤害与故意杀人",
+      "prompt": "审查行为人的主观故意内容、行为手段、打击部位、后续行为等，判断属于故意伤害还是故意杀人",
+      "frequency": 1
+    },
+    {
+      "id": "node_2",
+      "type": "检查",
+      "label": "审查行为人是否主动投案",
+      "prompt": "核实行为人是否在案发后主动向司法机关或有关单位投案",
+      "frequency": 1
+    },
+    {
+      "id": "node_3",
+      "type": "检查",
+      "label": "审查行为人是否如实供述主要犯罪事实",
+      "prompt": "核实行为人在投案后是否如实供述故意伤害的主要犯罪事实",
+      "frequency": 1
+    },
+    {
+      "id": "node_4",
+      "type": "结果",
+      "label": "综合认定是否构成自首",
+      "prompt": "结合主动投案和如实供述两项要件，综合判断是否成立自首",
+      "frequency": 1
+    }
+  ],
+  "edges": [
+    {
+      "from": "node_1",
+      "to": "node_2",
+      "type": "conditional",
+      "condition": "认定为故意伤害"
+    },
+    {
+      "from": "node_2",
+      "to": "node_3",
+      "type": "sequential"
+    },
+    {
+      "from": "node_3",
+      "to": "node_4",
+      "type": "sequential"
+    }
+  ]
+}
