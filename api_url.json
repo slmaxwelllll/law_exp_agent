@@ -1,0 +1,4 @@
+{
+    "base_url": "https://www.douyin.com/",
+    "search_endpoint": "/aweme/v1/web/general/search/single/"
+}
