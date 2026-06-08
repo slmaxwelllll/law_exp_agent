@@ -5,29 +5,101 @@ import re
 import sys
 from pathlib import Path
 
+
 # 确保 backend 目录在 sys.path 中
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from LLM.test_llm import LLMClient, LLMResponse
 from tool.Tool_get_wechat import GetWechatTool
+from wechat_service.visualize import VisualizeService
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
-ARTICLE_URL_DIR = BACKEND_DIR / "response" / "article_url"
-TEMPLATE_DIR = ARTICLE_URL_DIR / "templates"
+RESPONSE_DIR = BACKEND_DIR / "response"
+ARTICLE_URL_DIR = RESPONSE_DIR / "article_url"       # 阶段1：搜索缓存
+STAGE2_RES_DIR = RESPONSE_DIR / "stage2_res"          # 阶段2：步骤提取中间结果
+TEMPLATE_DIR = RESPONSE_DIR / "templates"             # 阶段3：流程模板
 
 
-EXTRACT_SYSTEM_PROMPT = (
-    "你是法律案例步骤抽取助手。你的任务是从给定文章中提取法律研判步骤序列。\n"
+STAGE_2_A_SYSTEM_PROMPT = (
+    "你是法律文章结构分析助手。你的任务是先理解文章的整体结构，再标注每部分的类型和用途。\n"
+    "法律文章通常由以下类型的段落混合组成：\n"
+    "  - 法条引述：原文引用或转述法律条文，提供规范依据\n"
+    "  - 裁判规则论述：抽象层面的法律适用规则或司法解释\n"
+    "  - 争议焦点：列出该案存在的法律分歧点或争议问题\n"
+    "  - 案例事实：具体案件的案情描述（当事人、时间线、行为等）\n"
+    "  - 案例研判：对具体案件的法律推理、观点比较、裁判逻辑\n"
+    "  - 法理评析：对裁判背后法理的延伸讨论（如法官后语、学者点评）\n"
+    "  - 程序说明：诉讼程序性描述（起诉、送达、开庭等）\n"
+    "  - 其他：不属于以上类型的内容\n"
+    "\n"
     "严格按以下JSON格式输出，不要输出任何其他内容：\n"
-    '{"is_legal_case": bool, "is_relate": "high|mid|low", "steps": [...], "reason": "..."}\n'
-    "字段说明：\n"
-    "  is_legal_case: 文章是否包含法律案例分析（true/false）\n"
-    "  is_relate: 文章内容与搜索关键词的匹配度\n"
-    "  steps: 文章中实际出现的法律研判步骤序列（按先后顺序），非案例或无关时为空数组\n"
-    "  reason: 简要判断依据\n"
-    "注意：steps 只提取文章中实际出现的判断逻辑，不要预设或猜测步骤。"
+    '{\n'
+    '  "is_legal_case": bool,\n'
+    '  "is_relate": "high|mid|low",\n'
+    '  "sections": [\n'
+    '    {\n'
+    '      "seq": 序号(从1开始),\n'
+    '      "type": "段落类型",\n'
+    '      "summary": "这部分核心内容的一句话概括",\n'
+    '      "purpose": "提供框架 | 展示研判方法 | 说明背景 | 无直接价值"\n'
+    '    }\n'
+    '  ],\n'
+    '  "reason": "整体判断依据"\n'
+    '}\n'
+    "重要规则：\n"
+    "  - sections 按原文出现顺序排列，seq 递增\n"
+    "  - summary 必须具体（不能只写\"法条内容\"，要说清楚是哪个法条、讲什么）\n"
+    "  - purpose 必须明确该段落对后续步骤提取的作用\n"
+    "  - 即使文章包含多个段落类型，也必须逐一列出"
 )
 
+STAGE_2_B_SYSTEM_PROMPT = (
+    "你是法律研判步骤提取助手。你将收到一篇文章的结构分析（sections）和原文正文。\n"
+    "你的任务是从文章的「案例研判」「争议焦点」「法理评析」等段落中提取法律研判步骤。\n"
+    "\n"
+    "★★★ 核心法则：法律关系的客体层级 ★★★\n"
+    "任何法律案件的审理都遵循天然的客体依赖层级。你必须按此层级组织步骤：\n"
+    "\n"
+    "  主客体（Primary Object）：\n"
+    "    案件的核心法律关系本身。必须先判断主客体是否成立。\n"
+    '    判断方法：问自己"如果这一步不成立，案件是否直接被驳回或判败诉？"\n'
+    "    若是 → 主客体；若否 → 从客体。\n"
+    '    简言之：案件"能不能赢"依赖主客体，"赢多少/怎么处理"依赖从客体。\n'
+    "\n"
+    "  从客体（Secondary Object）：\n"
+    "    依附于主客体成立后才处理的后果性客体。\n"
+    "    只有当主客体已判断为成立，才进入从客体的分析。\n"
+    "    各从客体之间是并列关系，无先后依赖。\n"
+    "\n"
+    "★★★ 提取规则 ★★★\n"
+    "1. 步骤仅从「案例研判」「争议焦点」「法理评析」段落提取，不从「法条引述」直接生成步骤\n"
+    '2. 每个步骤标注其所属客体类型："主客体" 或 "从客体"\n'
+    "3. 同一案件内，主客体步骤全部排在前，从客体步骤排在后面\n"
+    '4. 法条引述中的列举项（如"14种情形"）不得拆散为独立步骤，应作为判断依据合并到主客体步骤中\n'
+    "5. 诉讼法上的程序性节点（起诉、送达、开庭、上诉）不作为研判步骤，除非该程序本身是争议焦点\n"
+    "6. 判决不准离婚后再次起诉属于第二次独立诉讼，不建模为流程回边\n"
+    "\n"
+    "严格按以下JSON格式输出，不要输出任何其他内容：\n"
+    '{\n'
+    '  "case_steps": [\n'
+    '    {\n'
+    '      "case_label": "案例名称或简短标识",\n'
+    '      "section_seq": 来源段落的seq号,\n'
+    '      "steps": [\n'
+    '        {\n'
+    '          "seq": 步骤序号(从1开始),\n'
+    '          "object_type": "主客体 | 从客体",\n'
+    '          "step": "具体的研判动作描述"\n'
+    '        }\n'
+    '      ]\n'
+    '    }\n'
+    '  ]\n'
+    '}\n'
+    "注意：\n"
+    "  - 如果原文只有法条框架而无具体案例，case_steps 可为空数组\n"
+    '  - 步骤描述必须是具体的研判动作（如"对比两种意见，采纳第二种"），不能是抽象法条复述\n'
+    "  - 多个案例的步骤分别放在不同的 case_steps 条目中"
+)
 
 class TestAgent1:
     """三阶段流程挖掘 Agent"""
@@ -38,6 +110,7 @@ class TestAgent1:
             "search_wechat_articles": GetWechatTool(),
         }
         ARTICLE_URL_DIR.mkdir(parents=True, exist_ok=True)
+        STAGE2_RES_DIR.mkdir(parents=True, exist_ok=True)
         TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
 
     def _cached_url_path(self, keyword: str) -> Path:
@@ -101,15 +174,16 @@ class TestAgent1:
         for i, article in enumerate(articles[:10]):
             title = article.get("title", "")
             summary = article.get("summary", "")
-            article_text = f"标题：{title}\n摘要：{summary}"
+            text = article.get("text", "")
+            # 截断正文到 3000 字，控制 token 消耗
+            article_text = f"标题：{title}\n摘要：{summary}\n正文：{text[:3000]}"
 
-            # 每次独立消息，不带历史，避免串扰
             msg = [
                 {"role": "system", "content": EXTRACT_SYSTEM_PROMPT},
                 {"role": "user", "content": f"关键词：{keyword}\n文章内容：{article_text}"},
             ]
 
-            print(f"\n  [{i+1}/10] 提取: {title[:30]}...")
+            print(f"\n  [{i+1}/10] 提取: {title[:30]}...（正文{len(text)}字）")
             resp = await self.llm.generate(msg)
             parsed = self._parse_extract_json(resp.content or "")
             if parsed:
@@ -119,6 +193,7 @@ class TestAgent1:
                     "is_legal_case": False,
                     "is_relate": "low",
                     "steps": [],
+                    "text": text[:200],
                     "reason": f"解析失败: {resp.content[:100] if resp.content else '空响应'}",
                 })
         return results
@@ -173,9 +248,7 @@ class TestAgent1:
         # 写入模板文件
         with open(template_path, "w", encoding="utf-8") as f:
             f.write(template)
-        print(f"\n  模板已写入: {template_path}")
-
-        return template
+        return template, str(template_path)
 
     @staticmethod
     def _parse_extract_json(content: str) -> dict | None:
@@ -216,23 +289,31 @@ class TestAgent1:
         articles = json.loads(articles_json)
         print(f"\n>>> 阶段1完成：共获取 {len(articles)} 篇轻量数据")
 
-        # ========== 阶段2：逐篇独立提取步骤 ==========
+        # ========== 阶段2：逐篇独立提取步骤，返回步骤序列 ==========
         step_results = await self._stage2_extract(articles, keyword)
         legal_count = sum(1 for r in step_results if r.get("is_legal_case"))
         print(f"\n>>> 阶段2完成：有效案例 {legal_count}/{len(step_results)} 篇")
 
         # 保存中间结果供检查
-        with open("stage2_step_results.json", "w", encoding="utf-8") as f:
-            json.dump(step_results, f, ensure_ascii=False, indent=2)
+        safe_name = re.sub(r"[^\w\-]", "_", keyword)
+        stage2_path = STAGE2_RES_DIR / f"{safe_name}.json"
+        stage2_path.write_text(json.dumps(step_results, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"  阶段2结果已写入: {stage2_path}")
 
         # ========== 阶段3：批量归纳模板 ==========
-        template = await self._stage3_induce(step_results, keyword)
+        template, template_path = await self._stage3_induce(step_results, keyword)
+        # 渲染模板图
+        try:
+            visualize_service = VisualizeService()
+            visualize_service.render_template_graph(template_path)
+            print(f"\n  模板图已渲染")
+        except Exception as e:
+            print(f"渲染模板图失败: {e}")
         print(f"\n>>> 阶段3完成：\n{template}")
-
         return template
 
 
 if __name__ == "__main__":
     agent = TestAgent1()
-    result = asyncio.run(agent.run("故意伤害案例判例"))
+    result = asyncio.run(agent.run("案例分析 离婚诉讼"))
     print(f"\n=== 最终模板 ===\n{result}")
