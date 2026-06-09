@@ -1,0 +1,67 @@
+{
+  "keyword": "案例分析 公司合并",
+  "version": 1,
+  "sub_templates": [
+    {
+      "label": "合并财务报表范围控制权判断",
+      "template": {
+        "crime_type": "合并财务报表范围控制权判断",
+        "version": 1,
+        "nodes": [
+          {
+            "id": "n1",
+            "type": "检查",
+            "label": "审查普通合伙人可变回报占比是否显著",
+            "frequency": 1
+          },
+          {
+            "id": "n2",
+            "type": "检查",
+            "label": "审查普通合伙人实际风险本金比例",
+            "frequency": 1
+          },
+          {
+            "id": "n3",
+            "type": "检查",
+            "label": "审查是否存在保本保收益承诺",
+            "frequency": 1
+          },
+          {
+            "id": "n4",
+            "type": "检查",
+            "label": "审查普通合伙人承担无限连带责任的可能性",
+            "frequency": 1
+          },
+          {
+            "id": "n5",
+            "type": "结果",
+            "label": "判决主文：根据现有信息，A公司不能将B公司纳入合并财务报表范围",
+            "frequency": 1
+          }
+        ],
+        "edges": [
+          {
+            "from": "n1",
+            "to": "n2",
+            "type": "sequential"
+          },
+          {
+            "from": "n2",
+            "to": "n3",
+            "type": "sequential"
+          },
+          {
+            "from": "n3",
+            "to": "n4",
+            "type": "sequential"
+          },
+          {
+            "from": "n4",
+            "to": "n5",
+            "type": "sequential"
+          }
+        ]
+      }
+    }
+  ]
+}

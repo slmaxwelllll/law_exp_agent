@@ -35,7 +35,7 @@ class LLMClient:
     async def generate(self, messages:list[dict], tools=None) -> LLMResponse:
         """生成请求-响应，接收消息列表，工具列表，返回LLM响应"""
         response = await self.client.chat.completions.create(
-            model="deepseek-v4-flash",
+            model="deepseek-v4-pro",
             messages=messages,
             tools=tools or None
         )
