@@ -9,6 +9,7 @@ def _read_prompt(filename: str) -> str:
     return (_PROMPTS_DIR / filename).read_text(encoding="utf-8")
 
 
+STAGE_KW_DOMAIN_PROMPT = _read_prompt("stage_kw_domain.md")
 STAGE_2_A_SYSTEM_PROMPT = _read_prompt("stage2_A_prompt.md")
 STAGE_2_B_SYSTEM_PROMPT = _read_prompt("stage2_B_prompt.md")
 STAGE3_CLUSTER_PROMPT = _read_prompt("stage3_cluster_prompt.md")

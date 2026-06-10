@@ -21,6 +21,7 @@ TEMPLATE_DIR = RESPONSE_DIR / "templates"             # 阶段3：流程模板
 
 
 from prompts import (
+    STAGE_KW_DOMAIN_PROMPT,
     STAGE_2_A_SYSTEM_PROMPT,
     STAGE_2_B_SYSTEM_PROMPT,
     STAGE3_CLUSTER_PROMPT,
@@ -95,13 +96,37 @@ class TestAgent1:
                 return None
         return None
 
+    async def _stage_kw_domain(self, keyword: str = "") -> dict:
+        """阶段 kw：关键词 输出 法律制度定义（构成要件 + 法律效果）。一轮内复用，注入后续阶段。
+        优先使用传入 keyword；为空时从 article_url 本地缓存文件名反推关键词。"""
+        # 无关键词时，从本地 article_url 缓存提取
+        if not keyword:
+            cache_files = list(ARTICLE_URL_DIR.glob("*.json"))
+            if cache_files:
+                # 文件名格式：案例分析_公司合并.json → 案例分析 公司合并
+                keyword = cache_files[0].stem.replace("_", " ")
+                print(f"\n>>> stage_kw：从本地缓存提取关键词 [{keyword}]")
+            else:
+                return {"is_valid": False, "reason": "无关键词且无本地缓存文件"}
 
-    async def _stage2_process_one(self, article: dict, keyword: str, index: int, total: int) -> dict:
+        msg = [
+            {"role": "system", "content": STAGE_KW_DOMAIN_PROMPT},
+            {"role": "user", "content": keyword},
+        ]
+        resp = await self.llm.generate(msg)
+        legal_def = self._parse_extract_json(resp.content or "")
+        if not legal_def or not legal_def.get("is_valid"):
+            return {"is_valid": False, "reason": legal_def.get("reason", "关键词无法映射到法律制度") if legal_def else "stage_kw 解析失败"}
+        print(f"\n>>> stage_kw：关键词 [{keyword}] 输出 领域 [{legal_def.get('domain')}]")
+        return legal_def
+
+    async def _stage2_process_one(self, article: dict, keyword: str, legal_def: dict, index: int, total: int) -> dict:
         """处理单篇文章：2A 结构分析 → 2B 提取研判步骤"""
         title = article.get("title", "")
         summary = article.get("summary", "")
         text = article.get("text", "")
         text_len = len(text)
+        legal_def_json = json.dumps(legal_def, ensure_ascii=False)
 
         # --- 阶段2A：文章结构分析（头尾策略，覆盖开头概览和结尾分析）---
         if text_len > 4000:
@@ -113,7 +138,10 @@ class TestAgent1:
         print(f"\n  [{index+1}/{total}] 2A 结构分析: {title[:40]}...（原文{text_len}字）")
         msg_2a = [
             {"role": "system", "content": STAGE_2_A_SYSTEM_PROMPT},
-            {"role": "user", "content": f"关键词：{keyword}\n文章标题：{title}\n文章内容：{article_text_2a}"},
+            {"role": "user", "content": (
+                f"【关键词法律制度定义】\n{legal_def_json}\n\n"
+                f"关键词：{keyword}\n文章标题：{title}\n文章内容：{article_text_2a}"
+            )},
         ]
 
         resp_2a = await self.llm.generate(msg_2a)
@@ -122,23 +150,28 @@ class TestAgent1:
             return {
                 "title": title,
                 "is_case": False,
-                "is_relevant": False,
+                "is_valid": False,
                 "sections": [],
                 "case_steps": [],
+                "cross_steps": [],
                 "reason": f"2A解析失败: {resp_2a.content[:100] if resp_2a.content else '空响应'}",
             }
-        # 与关键词领域不相关的文章直接跳过
-        if not sections_data.get("is_relevant_to_keyword", False):
+        # 不在关键词制度框架内的文章直接跳过
+        if not sections_data.get("is_valid", False):
             return {
                 "title": title,
                 "is_case": sections_data.get("is_case", False),
-                "is_relevant": False,
+                "is_valid": False,
                 "sections": sections_data.get("sections", []),
                 "case_steps": [],
+                "cross_steps": [],
                 "reason": sections_data.get("reason", ""),
             }
 
-        # 获取 sections 用于 2B
+        # 提取 article_issue 供 2B 使用
+        article_issue = sections_data.get("article_issue", {})
+        is_exceptional = article_issue.get("is_exceptional", False)
+        cross_reference = article_issue.get("cross_reference", {})
         sections = sections_data.get("sections", [])
 
         # --- 阶段2B：基于结构提取研判步骤（给更多正文，最高 6000 字）---
@@ -146,12 +179,15 @@ class TestAgent1:
         article_text_2b = f"标题：{title}\n摘要：{summary}\n正文：{text_2b}"
 
         print(f"  [{index+1}/{total}] 2B 步骤提取: {title[:40]}...")
+        article_issue_json = json.dumps(article_issue, ensure_ascii=False)
         sections_json = json.dumps(sections_data, ensure_ascii=False)
         msg_2b = [
             {"role": "system", "content": STAGE_2_B_SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": (
+                    f"【关键词法律制度定义】\n{legal_def_json}\n\n"
+                    f"【文章分析结果】\n{article_issue_json}\n\n"
                     f"关键词：{keyword}\n"
                     f"文章标题：{title}\n"
                     f"结构分析结果：\n{sections_json}\n"
@@ -162,40 +198,45 @@ class TestAgent1:
         resp_2b = await self.llm.generate(msg_2b)
         steps_data = self._parse_extract_json(resp_2b.content or "")
 
-        # 合并结果
+        # 合并结果：is_valid 来自 2A（框架归入），case_steps/cross_steps 来自 2B
+        case_steps = steps_data.get("case_steps", []) if steps_data else []
+        cross_steps = steps_data.get("cross_steps", []) if steps_data else []
+
         return {
             "title": title,
             "is_case": sections_data.get("is_case", False),
-            "is_relevant": sections_data.get("is_relevant_to_keyword", False),
-            # 主要筛选
-            "keyword_domain": sections_data.get("keyword_domain", ""),
-            "article_domain": sections_data.get("article_domain", ""),
+            "is_valid": sections_data.get("is_valid", False),
+            "is_exceptional": is_exceptional,
+            "article_issue": article_issue,
+            "keyword_framework": sections_data.get("keyword_framework", ""),
             "sections": sections,
             "topic": steps_data.get("topic", "") if steps_data else "",
             "conclusion": steps_data.get("conclusion", "") if steps_data else "",
-            "case_steps": steps_data.get("case_steps", []) if steps_data else [],
+            "case_steps": case_steps,
+            "cross_steps": cross_steps,
             "reason": sections_data.get("reason", ""),
         }
 
-    async def _stage2_extract(self, articles: list[dict], keyword: str) -> list[dict]:
+    async def _stage2_extract(self, articles: list[dict], keyword: str, legal_def: dict) -> list[dict]:
         """阶段2：并发执行 10 篇 —— 2A 结构分析 → 2B 提取研判步骤"""
         articles = articles[:10]
         tasks = [
-            self._stage2_process_one(article, keyword, i, len(articles))
+            self._stage2_process_one(article, keyword, legal_def, i, len(articles))
             for i, article in enumerate(articles)
         ]
         results = await asyncio.gather(*tasks)
         return list(results)
 
-    async def _stage3_induce(self, step_results: list[dict], keyword: str) -> str:
+    async def _stage3_induce(self, step_results: list[dict], keyword: str, legal_def: dict) -> str:
         """阶段3：按核心主题聚类 → 聚类内归纳 → 输出模板树"""
+        # 有效 case：is_valid=true 且（有标准步骤 或 有旁引步骤）
         valid = [r for r in step_results
-                 if r.get("is_relevant")
-                 and len(r.get("case_steps", [])) > 0]
+                 if r.get("is_valid")
+                 and (len(r.get("case_steps", [])) > 0 or len(r.get("cross_steps", [])) > 0)]
         if not valid:
             return "无有效案例，无法构建模板。", ""
 
-        # 读取已有模板树（如存在）
+        # 读取已有模板树
         existing_tree = ""
         template_path = TEMPLATE_DIR / f"{re.sub(r'[^\w\-]', '_', keyword)}.json"
         if template_path.exists():
@@ -208,16 +249,23 @@ class TestAgent1:
                 "index": i + 1,
                 "topic": r.get("topic", ""),
                 "conclusion": r.get("conclusion", ""),
+                "is_exceptional": r.get("is_exceptional", False),
                 "case_steps": r.get("case_steps", []),
+                "cross_steps": r.get("cross_steps", []),
+                "cross_reference": r.get("article_issue", {}).get("cross_reference", {}),
                 "sections": r.get("sections", []),
                 "reason": r.get("reason", ""),
             })
 
         # --- 步骤1：LLM 按核心主题语义聚类 ---
+        legal_def_json = json.dumps(legal_def, ensure_ascii=False)
         case_json = json.dumps(case_data, ensure_ascii=False)
         cluster_msg = [
             {"role": "system", "content": STAGE3_CLUSTER_PROMPT},
-            {"role": "user", "content": f"关键词：{keyword}\n案件列表：\n{case_json}"},
+            {"role": "user", "content": (
+                f"【关键词法律制度定义】\n{legal_def_json}\n\n"
+                f"关键词：{keyword}\n案件列表：\n{case_json}"
+            )},
         ]
         resp_cluster = await self.llm.generate(cluster_msg)
         cluster_data = self._parse_extract_json(resp_cluster.content or "")
@@ -247,13 +295,14 @@ class TestAgent1:
                 {
                     "role": "user",
                     "content": (
+                        f"【关键词法律制度定义】\n{legal_def_json}\n\n"
                         f"关键词：{keyword}\n"
                         f"本组标签：{g['label']}\n"
                         f"本组案例（共{len(group_cases)}篇）：\n{group_json}\n"
                         "请归纳为该主题的子流程模板，输出为JSON：\n"
-                        '{"crime_type": "...", "version": N, "nodes": [...], "edges": [...]}\n'
-                        "nodes: [{id, type(检查/分支/结果), label, prompt(可选), frequency}]\n"
-                        "edges: [{from, to, type(sequential/conditional), condition(可选)}]"
+                        '{"keyword": "...", "version": N, "nodes": [...], "edges": [...]}\n'
+                        "nodes: [{id, type(关键词/主题/检查/分支/结果), label, prompt(可选), frequency}]\n"
+                        "edges: [{from, to, type(sequential/conditional/未采纳), condition(可选)}]"
                     ),
                 },
             ]
@@ -310,6 +359,11 @@ class TestAgent1:
     async def run(self, keyword: str) -> str:
         print(f"=== 三阶段测试：关键词 = {keyword} ===")
 
+        # ========== 阶段 kw：关键词 → 法律制度定义 ==========
+        legal_def = await self._stage_kw_domain(keyword)
+        if not legal_def.get("is_valid"):
+            return f"阶段 kw 失败：{legal_def.get('reason')}"
+
         # ========== 阶段1：采集 ==========
         articles_json = await self._stage1_search(keyword)
         if not articles_json:
@@ -319,9 +373,10 @@ class TestAgent1:
         print(f"\n>>> 阶段1完成：共获取 {len(articles)} 篇轻量数据")
 
         # ========== 阶段2：逐篇独立提取步骤，返回步骤序列 ==========
-        step_results = await self._stage2_extract(articles, keyword)
-        relevant_count = sum(1 for r in step_results if r.get("is_relevant"))
-        print(f"\n>>> 阶段2完成：领域相关 {relevant_count}/{len(step_results)} 篇")
+        step_results = await self._stage2_extract(articles, keyword, legal_def)
+        valid_count = sum(1 for r in step_results if r.get("is_valid"))
+        exceptional_count = sum(1 for r in step_results if r.get("is_exceptional"))
+        print(f"\n>>> 阶段2完成：有效 {valid_count}/{len(step_results)} 篇（其中例外 {exceptional_count} 篇）")
 
         # 保存中间结果供检查
         safe_name = re.sub(r"[^\w\-]", "_", keyword)
@@ -329,21 +384,22 @@ class TestAgent1:
         stage2_path.write_text(json.dumps(step_results, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"  阶段2结果已写入: {stage2_path}")
 
-        # ========== 阶段3：批量归纳模板 ==========
-        template, template_path = await self._stage3_induce(step_results, keyword)
-        # 渲染模板图
-        if template_path:
-            try:
-                visualize_service = VisualizeService()
-                visualize_service.render_template_graph(template_path)
-                print(f"\n  模板图已渲染")
-            except Exception as e:
-                print(f"渲染模板图失败: {e}")
-        print(f"\n>>> 阶段3完成：\n{template}")
-        return template
+        # # ========== 阶段3：批量归纳模板 ==========
+        # template, template_path = await self._stage3_induce(step_results, keyword, legal_def)
+        # # 渲染模板图
+        # if template_path:
+        #     try:
+        #         visualize_service = VisualizeService()
+        #         visualize_service.render_template_graph(template_path)
+        #         print(f"\n  模板图已渲染")
+        #     except Exception as e:
+        #         print(f"渲染模板图失败: {e}")
+        # print(f"\n>>> 阶段3完成：\n{template}")
+        # return template
+        return "阶段2完成。阶段3已截断。"
 
 
 if __name__ == "__main__":
     agent = TestAgent1()
-    result = asyncio.run(agent.run("案例分析 公司合并"))
+    result = asyncio.run(agent.run("案例分析 离婚诉讼"))
     print(f"\n=== 最终模板 ===\n{result}")

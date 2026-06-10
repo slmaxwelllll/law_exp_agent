@@ -38,15 +38,17 @@ plt.rcParams["axes.unicode_minus"] = False   # 解决负号显示问题
 
 # 节点类型 → 颜色和形状映射
 NODE_STYLE = {
-    "检查": {"color": "#4A90D9", "shape": "o"},
-    "分支": {"color": "#F5A623", "shape": "D"},
-    "处理": {"color": "#F5A623", "shape": "o"},
-    "结果": {"color": "#7ED321", "shape": "s"},
+    "关键词": {"color": "#8B5CF6", "shape": "s"},     # 紫色方形 —— 根节点
+    "主题":   {"color": "#EC4899", "shape": "D"},     # 粉色菱形 —— 主题子树根
+    "检查":   {"color": "#4A90D9", "shape": "o"},     # 蓝色圆形 —— 审查/分析步骤
+    "分支":   {"color": "#F5A623", "shape": "D"},     # 橙色菱形 —— 条件分支点
+    "结果":   {"color": "#7ED321", "shape": "s"},     # 绿色方形 —— 结论节点
 }
 
 EDGE_STYLE = {
     "sequential":   {"style": "solid",  "color": "#333333"},
     "conditional":  {"style": "dashed", "color": "#999999"},
+    "未采纳":       {"style": "dotted", "color": "#CC4444"},  # 法院考虑但未采纳的论证路径
 }
 
 
@@ -140,9 +142,10 @@ class VisualizeService:
         nx.draw_networkx_labels(G, pos, labels=node_labels, font_size=7,
                                 font_family=_FONT_NAME)
 
-        # 分别画顺序边和条件边
+        # 分别画顺序边、条件边和未采纳边
         seq_edges = [(u, v) for (u, v), s in zip(G.edges(), edge_styles) if s["style"] == "solid"]
         cond_edges = [(u, v) for (u, v), s in zip(G.edges(), edge_styles) if s["style"] == "dashed"]
+        reject_edges = [(u, v) for (u, v), s in zip(G.edges(), edge_styles) if s["style"] == "dotted"]
 
         if seq_edges:
             nx.draw_networkx_edges(G, pos, edgelist=seq_edges, edge_color="#333333",
@@ -150,11 +153,14 @@ class VisualizeService:
         if cond_edges:
             nx.draw_networkx_edges(G, pos, edgelist=cond_edges, edge_color="#999999",
                                    style="dashed", arrows=True, arrowsize=12, width=1)
+        if reject_edges:
+            nx.draw_networkx_edges(G, pos, edgelist=reject_edges, edge_color="#CC4444",
+                                   style="dotted", arrows=True, arrowsize=10, width=1)
 
-        # 提取标题
-        crime_type = data.get("crime_type", "流程模板")
+        # 提取标题（兼容新旧字段名）
+        keyword = data.get("keyword", data.get("crime_type", "流程模板"))
         version = data.get("version", "")
-        title = f"{crime_type} v{version}" if version else crime_type
+        title = f"{keyword} v{version}" if version else keyword
         if subtitle:
             title = f"{title}\n[{subtitle}]"
         plt.title(title, fontsize=14)
